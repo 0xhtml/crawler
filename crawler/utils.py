@@ -13,7 +13,7 @@ from lxml.html.clean import Cleaner
 _DOUBLE_SLASH_REGEX = re.compile("//+")
 _BODY_XPATH = etree.XPath("//body")
 _LANG_XPATH = etree.XPath("//*[@lang]")
-_LINK_XPATH = etree.XPath("//a[@href]")
+_HREF_XPATH = etree.XPath("//a[not(@rel) or @rel!='nofollow']/@href")
 _MODEL = fasttext.load_model("lid.176.bin")
 
 HTML_CLEANER = Cleaner(
@@ -94,9 +94,7 @@ def get_links(url: URL, dom: html.HtmlElement) -> set[URL]:
     """Get all links of a page."""
     links = set()
 
-    for link in _LINK_XPATH(dom):
-        href = link.attrib.get("href")
-
+    for href in _HREF_XPATH(dom):
         try:
             try:
                 parsed_href = url.join(href)
