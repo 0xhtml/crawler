@@ -1,5 +1,6 @@
 """Module to deal with robots.txt files."""
 
+import math
 import time
 import urllib.robotparser
 from typing import Any, Optional
@@ -65,8 +66,14 @@ class RobotsFileTable:
         if url.netloc not in self._map:
             return None
 
-        crawl_delay = self._map[url.netloc].crawl_delay(USER_AGENT)
-        if crawl_delay is None:
+        delay = self._map[url.netloc].crawl_delay(USER_AGENT)
+        delay = 0 if delay is None else float(delay)
+
+        rate = self._map[url.netloc].request_rate(USER_AGENT)
+        rate = math.inf if rate is None else (rate.requests / rate.seconds)
+
+        delay = max(delay, 1 / rate)
+        if delay == 0:
             return None
 
-        return time.time() + int(crawl_delay)
+        return time.time() + delay
