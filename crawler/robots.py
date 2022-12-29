@@ -45,7 +45,7 @@ class RobotsFileTable:
         """Check if robot is allowed to fetch URL."""
         if (
             url.netloc not in self._map
-            or self._map[url.netloc].mtime() + 24 * 60 * 60 > time.time()
+            or self._map[url.netloc].mtime() + 24 * 60 * 60 < time.time()
         ):
             self._map[url.netloc] = RobotsFile()
             await self._map[url.netloc].load(
