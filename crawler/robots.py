@@ -21,7 +21,7 @@ class RobotsFile(urllib.robotparser.RobotFileParser):
         elif (
             response is not None
             and response.is_client_error
-            and response.status_code not in (401, 403)
+            and response.status_code != 429
         ):
             self.allow_all = True
         else:
@@ -39,7 +39,10 @@ class RobotsFileTable:
 
     async def can_fetch(self, url: URL) -> bool:
         """Check if robot is allowed to fetch URL."""
-        if url.netloc not in self._map:
+        if (
+            url.netloc not in self._map
+            or self._map[url.netloc].mtime() + 24 * 60 * 60 > time.time()
+        ):
             self._map[url.netloc] = RobotsFile()
             await self._map[url.netloc].load(
                 self._client,

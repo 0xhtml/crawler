@@ -27,9 +27,13 @@ def _is_valid_response(response: httpx.Response) -> bool:
         "content-type",
         "text/html" if response.request.method == "HEAD" else "",
     )
-
     if not content_type.startswith("text/html"):
         print(f"SKIP {str(response.url)[:80]} != text/html ({content_type})")
+        return False
+
+    x_robots_tag = response.headers.get("x-robots-tag", "")
+    if "nofollow" in x_robots_tag:
+        print(f"SKIP {str(response.url)[:80]} nofollow (xrst: {x_robots_tag})")
         return False
 
     return True
