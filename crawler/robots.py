@@ -2,7 +2,7 @@
 
 import time
 import urllib.robotparser
-from typing import Optional
+from typing import Any, Optional
 
 from httpx import URL
 
@@ -36,6 +36,10 @@ class RobotsFileTable:
         """Initialize robots.txt file table."""
         self._client = client
         self._map: dict[bytes, RobotsFile] = {}
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Return state used by pickle."""
+        return {"_map": self._map}
 
     async def can_fetch(self, url: URL) -> bool:
         """Check if robot is allowed to fetch URL."""

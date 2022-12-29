@@ -1,9 +1,9 @@
 """The crawler that can crawl the internet."""
 
 import asyncio
-import pickle
 import re
 import time
+from typing import NamedTuple
 
 import httpx
 import sqlalchemy
@@ -39,10 +39,20 @@ def _is_valid_response(response: httpx.Response) -> bool:
     return True
 
 
+class _CrawlerState(NamedTuple):
+    robots_file_table: RobotsFileTable
+    pending_urls: BucketSet[URL, bytes]
+    timeouts: dict[bytes, float]
+
+
 class Crawler:
     """The crawler."""
 
     _NEWLINE_REGEX = re.compile(rb"\n+")
+
+    @staticmethod
+    def _get_netloc(url: URL) -> bytes:
+        return url.netloc
 
     def __init__(self):
         """Connect to database and init HTTPXClient."""
@@ -50,15 +60,12 @@ class Crawler:
         self._httpx_client = HTTPXClient()
         self._robots_file_table = RobotsFileTable(self._httpx_client)
 
-        def get_netloc(url: URL) -> bytes:
-            return url.netloc
-
-        self._pending_urls = BucketSet(get_netloc)
+        self._pending_urls = BucketSet(self._get_netloc)
+        self._active_urls: set[URL] = set()
+        self._timeouts: dict[bytes, float] = {}
 
         self._stopping = False
         self._condition = asyncio.Condition()
-        self._active_urls: set[URL] = set()
-        self._timeouts: dict[bytes, float] = {}
 
     async def __aenter__(self):
         """Call enter method of database connection and HTTPXClient."""
@@ -71,31 +78,45 @@ class Crawler:
         self._db_conn.__exit__(exc_type, exc, tb)
         await self._httpx_client.__aexit__(exc_type, exc, tb)
 
-    def load_urls_pkl(self, filename: str) -> bool:
-        """Try loading URLs from the pkl file returning True on success."""
-        try:
-            with open(filename, "rb") as file:
-                self._pending_urls._dict = pickle.load(file)
-            return True
-        except FileNotFoundError:
+    def __getstate__(self) -> _CrawlerState:
+        """Return state used by pickle."""
+        if self._active_urls:
+            raise RuntimeError("Can't get state of active crawler.")
+        return _CrawlerState(
+            self._robots_file_table, self._pending_urls, self._timeouts
+        )
+
+    def __setstate__(self, state: _CrawlerState):
+        """Restore state loaded by pickle."""
+        self.__init__()
+
+        state.robots_file_table._client = self._httpx_client
+
+        self._robots_file_table = state.robots_file_table
+        self._pending_urls = state.pending_urls
+        self._timeouts = state.timeouts
+
+    def add_url(self, url: str):
+        """Add a URL passed as str to the pending URLs."""
+        self._pending_urls.add(normalize_url(URL(url)))
+
+    def load_urls_db(self) -> bool:
+        """Load the URLs out of the database (slow)."""
+        count = self._db_conn.execute(
+            sqlalchemy.func.count(db.DOCUMENTS_TABLE.c.url)
+        ).scalar()
+        if count is None or count <= 0:
             return False
 
-    def load_urls_db(self):
-        """Load the URLs out of the database (slow)."""
         for document in tqdm(
             self._db_conn.execute(sqlalchemy.select(db.DOCUMENTS_TABLE)),
-            total=self._db_conn.execute(
-                sqlalchemy.func.count(db.DOCUMENTS_TABLE.c.url)
-            ).scalar(),
+            total=count,
             ncols=100,
         ):
             dom = etree.fromstring(document.content, parser=html.html_parser)
             self._pending_urls.update(get_links(URL(document.url), dom))
 
-    def dump_urls_pkl(self, filename: str):
-        """Dump URLs to the pkl file."""
-        with open(filename, "wb") as file:
-            pickle.dump(self._pending_urls._dict, file)
+        return True
 
     async def stop(self):
         """Start stopping all workers."""
