@@ -2,7 +2,7 @@
 
 import asyncio
 from ssl import SSLError
-from typing import Optional
+from typing import Mapping, Optional
 
 import httpx
 
@@ -23,19 +23,21 @@ class HTTPXClient(httpx.AsyncClient):
             follow_redirects=True,
         )
 
-    async def retrying_request(
-        self, m: str, url: httpx.URL
+    async def retrying_get(
+        self,
+        url: httpx.URL,
+        headers: Optional[Mapping[str, str]] = None,
     ) -> Optional[httpx.Response]:
-        """Call httpx's request retrying on errors."""
+        """Call httpx's get request retrying on errors."""
         for _ in range(self._MAX_RETRIES):
             try:
-                return await self.request(m, url)
+                return await self.get(url, headers=headers)
             except (
                 httpx.NetworkError,
                 httpx.ProtocolError,
                 httpx.TimeoutException,
             ) as e:
-                print(f"RETRY {m} {str(url)[:80]} {type(e).__name__} {e}")
+                print(f"RETRY {str(url)[:80]} {type(e).__name__} {e}")
                 await asyncio.sleep(0.5)
             except (
                 SSLError,
@@ -43,16 +45,8 @@ class HTTPXClient(httpx.AsyncClient):
                 httpx.DecodingError,
                 httpx.TooManyRedirects,
             ) as e:
-                print(f"ERROR {m} {str(url)[:80]} {type(e).__name__} {e}")
+                print(f"ERROR {str(url)[:80]} {type(e).__name__} {e}")
                 return None
 
-        print(f"ERROR {m} {str(url)[:80]} too many tries")
+        print(f"ERROR {str(url)[:80]} too many tries")
         return None
-
-    async def retrying_head(self, url: httpx.URL) -> Optional[httpx.Response]:
-        """Call httpx's head retrying on errors."""
-        return await self.retrying_request("HEAD", url)
-
-    async def retrying_get(self, url: httpx.URL) -> Optional[httpx.Response]:
-        """Call httpx's get retrying on errors."""
-        return await self.retrying_request("GET", url)

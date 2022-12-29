@@ -5,7 +5,6 @@ import re
 import time
 from typing import NamedTuple
 
-import httpx
 import sqlalchemy
 from httpx import URL
 from lxml import etree, html
@@ -16,27 +15,6 @@ from .bucketset import BucketSet
 from .httpxclient import HTTPXClient
 from .robots import RobotsFileTable
 from .utils import HTML_CLEANER, get_lang, get_links, normalize_url
-
-
-def _is_valid_response(response: httpx.Response) -> bool:
-    if not response.is_success:
-        print(f"SKIP {str(response.url)[:80]} != 2xx ({response.status_code})")
-        return False
-
-    content_type = response.headers.get(
-        "content-type",
-        "text/html" if response.request.method == "HEAD" else "",
-    )
-    if not content_type.startswith("text/html"):
-        print(f"SKIP {str(response.url)[:80]} != text/html ({content_type})")
-        return False
-
-    x_robots_tag = response.headers.get("x-robots-tag", "")
-    if "nofollow" in x_robots_tag:
-        print(f"SKIP {str(response.url)[:80]} nofollow (xrst: {x_robots_tag})")
-        return False
-
-    return True
 
 
 class _CrawlerState(NamedTuple):
@@ -145,45 +123,55 @@ class Crawler:
         if not await self._robots_file_table.can_fetch(url):
             return set()
 
-        head_response = await self._httpx_client.retrying_head(url)
-        if (
-            head_response is None
-            or not _is_valid_response(head_response)
-            or self._exists(head_response.url)
-        ):
-            return set()
-
         timeout = self._robots_file_table.timeout(url)
         if timeout is not None:
-            self._timeouts[head_response.url.netloc] = timeout
+            self._timeouts[url.netloc] = timeout
 
-        get_response = await self._httpx_client.retrying_get(head_response.url)
-        if (
-            get_response is None
-            or not _is_valid_response(get_response)
-            or self._exists(get_response.url)
-        ):
+        response = await self._httpx_client.retrying_get(
+            url, {"accept": "text/html", "accept-language": "de,en"}
+        )
+        if response is None:
             return set()
 
-        dom = etree.fromstring(get_response.content, parser=html.html_parser)
+        if not response.is_success:
+            print(f"SKIP {str(response.url)[:80]} HTTP {response.status_code}")
+            return set()
+
+        content_type = response.headers.get("content-type", "")
+        if not content_type.startswith("text/html"):
+            print(f"SKIP {str(response.url)[:80]} != html ({content_type})")
+            return set()
+
+        x_robots_tag = response.headers.get("x-robots-tag", "")
+        if "nofollow" in x_robots_tag:
+            print(
+                f"SKIP {str(response.url)[:80]} nofollow "
+                f"(X-Robots-Tag: {x_robots_tag})"
+            )
+            return set()
+
+        if self._exists(response.url):
+            return set()
+
+        dom = etree.fromstring(response.content, parser=html.html_parser)
         if dom is None:
-            print(f"SKIP {str(get_response.url)[:80]} dom is None")
+            print(f"SKIP {str(response.url)[:80]} dom is None")
             return set()
 
         HTML_CLEANER(dom)
 
         if get_lang(dom) not in {"de", "en"}:
-            print(f"SKIP {str(get_response.url)[:80]} lang isn't de or en")
+            print(f"SKIP {str(response.url)[:80]} lang isn't de or en")
             return set()
 
         self._db_conn.execute(
             sqlalchemy.insert(db.DOCUMENTS_TABLE).values(
-                url=str(get_response.url),
+                url=str(response.url),
                 content=self._NEWLINE_REGEX.sub(b"\n", html.tostring(dom)),
             )
         )
 
-        return get_links(get_response.url, dom)
+        return get_links(response.url, dom)
 
     async def worker(self):
         """Work for eternity or until stop is called."""
