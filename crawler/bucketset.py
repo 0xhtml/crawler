@@ -46,9 +46,8 @@ class BucketSet(collections.abc.MutableSet[T], Generic[T, K]):
         for item in iterable:
             self.add(item)
 
-    def key_difference(self, items: Iterable[T]) -> set[T]:
+    def key_difference(self, keys: set[K]) -> set[T]:
         """Return a normal set of all items stored in a different bucket."""
-        keys = {self._key(item) for item in items}
         return {
             item
             for key, items in self._dict.items()

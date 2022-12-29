@@ -1,8 +1,10 @@
 """Module to deal with robots.txt files."""
 
+import time
 import urllib.robotparser
+from typing import Optional
 
-import httpx
+from httpx import URL
 
 from .httpxclient import USER_AGENT, HTTPXClient
 
@@ -10,18 +12,8 @@ from .httpxclient import USER_AGENT, HTTPXClient
 class RobotsFile(urllib.robotparser.RobotFileParser):
     """HTTPX AsyncClient supporting RobotFileParser."""
 
-    def __init__(self):
-        """Initialize RobotsFile."""
-        super().__init__()
-        self._loaded = False
-
-    async def load(self, client: HTTPXClient, url: httpx.URL):
+    async def load(self, client: HTTPXClient, url: URL):
         """Load robots.txt file."""
-        if self._loaded:
-            raise RuntimeError("Called load twice.")
-
-        self._loaded = True
-
         response = await client.retrying_get(url)
 
         if response is not None and response.is_success:
@@ -36,13 +28,6 @@ class RobotsFile(urllib.robotparser.RobotFileParser):
             print(f"ROBOTS '{url}' dissallow_all")
             self.disallow_all = True
 
-    def can_fetch(self, url: httpx.URL) -> bool:
-        """Check if robot is allowed to fetch URL."""
-        if not self._loaded:
-            raise RuntimeError("Called can_fetch w/o calling load before.")
-
-        return super().can_fetch(USER_AGENT, str(url))
-
 
 class RobotsFileTable:
     """A table to store robots.txt files for urls."""
@@ -50,16 +35,31 @@ class RobotsFileTable:
     def __init__(self, client: HTTPXClient):
         """Initialize robots.txt file table."""
         self._client = client
-        self._map: dict[httpx.URL, RobotsFile] = {}
+        self._map: dict[bytes, RobotsFile] = {}
 
-    async def can_fetch(self, url: httpx.URL) -> bool:
+    async def can_fetch(self, url: URL) -> bool:
         """Check if robot is allowed to fetch URL."""
-        robot_url = url.copy_with(
-            path="/robots.txt", query=None, fragment=None
-        )
+        if url.netloc not in self._map:
+            self._map[url.netloc] = RobotsFile()
+            await self._map[url.netloc].load(
+                self._client,
+                url.copy_with(
+                    userinfo=None,
+                    path="/robots.txt",
+                    query=None,
+                    fragment=None,
+                ),
+            )
 
-        if robot_url not in self._map:
-            self._map[robot_url] = RobotsFile()
-            await self._map[robot_url].load(self._client, robot_url)
+        return self._map[url.netloc].can_fetch(USER_AGENT, str(url))
 
-        return self._map[robot_url].can_fetch(url)
+    def timeout(self, url: URL) -> Optional[float]:
+        """Get the timeout for the next request."""
+        if url.netloc not in self._map:
+            return None
+
+        crawl_delay = self._map[url.netloc].crawl_delay(USER_AGENT)
+        if crawl_delay is None:
+            return None
+
+        return time.time() + int(crawl_delay)

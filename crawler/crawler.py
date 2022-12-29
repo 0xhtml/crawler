@@ -3,6 +3,7 @@
 import asyncio
 import pickle
 import re
+import time
 
 import httpx
 import sqlalchemy
@@ -53,6 +54,7 @@ class Crawler:
         self._stopping = False
         self._condition = asyncio.Condition()
         self._active_urls: set[URL] = set()
+        self._timeouts: dict[bytes, float] = {}
 
     async def __aenter__(self):
         """Call enter method of database connection and HTTPXClient."""
@@ -98,6 +100,14 @@ class Crawler:
         async with self._condition:
             self._condition.notify_all()
 
+    def _update_timeouts(self):
+        ctime = time.time()
+        self._timeouts = {
+            netloc: timeout
+            for netloc, timeout in self._timeouts.items()
+            if timeout > ctime
+        }
+
     def _exists(self, url: URL):
         return (
             self._db_conn.execute(
@@ -117,6 +127,10 @@ class Crawler:
             or self._exists(head_response.url)
         ):
             return set()
+
+        timeout = self._robots_file_table.timeout(url)
+        if timeout is not None:
+            self._timeouts[head_response.url.netloc] = timeout
 
         get_response = await self._httpx_client.retrying_get(head_response.url)
         if (
@@ -149,9 +163,16 @@ class Crawler:
     async def worker(self):
         """Work for eternity or until stop is called."""
         while not self._stopping:
-            while not (
-                urls := self._pending_urls.key_difference(self._active_urls)
-            ):
+            while True:
+                self._update_timeouts()
+
+                netlocs = {url.netloc for url in self._active_urls}
+                urls = self._pending_urls.key_difference(
+                    netlocs.union(self._timeouts.keys())
+                )
+                if urls:
+                    break
+
                 async with self._condition:
                     await self._condition.wait()
                 if self._stopping:
