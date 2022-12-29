@@ -18,7 +18,6 @@ class HTTPXClient(httpx.AsyncClient):
         """Set configuration for httpx.AsyncClient."""
         super().__init__(
             headers={"user-agent": USER_AGENT},
-            http2=True,
             timeout=httpx.Timeout(connect=15, read=20, write=5, pool=None),
             follow_redirects=True,
         )
