@@ -111,41 +111,40 @@ class Crawler:
             return set()
 
         head_response = await self._httpx_client.retrying_head(url)
-        if head_response is None or not _is_valid_response(head_response):
+        if (
+            head_response is None
+            or not _is_valid_response(head_response)
+            or self._exists(head_response.url)
+        ):
             return set()
 
-        url = normalize_url(head_response.url, head_response.history)
-        if self._exists(url):
-            return set()
-
-        get_response = await self._httpx_client.retrying_get(url)
-        if get_response is None or not _is_valid_response(get_response):
-            return set()
-
-        get_response.history[0:0] = head_response.history
-        url = normalize_url(get_response.url, get_response.history)
-        if self._exists(url):
+        get_response = await self._httpx_client.retrying_get(head_response.url)
+        if (
+            get_response is None
+            or not _is_valid_response(get_response)
+            or self._exists(get_response.url)
+        ):
             return set()
 
         dom = etree.fromstring(get_response.content, parser=html.html_parser)
         if dom is None:
-            print(f"SKIP {str(url)[:80]} dom is None")
+            print(f"SKIP {str(get_response.url)[:80]} dom is None")
             return set()
 
         HTML_CLEANER(dom)
 
         if get_lang(dom) not in {"de", "en"}:
-            print(f"SKIP {str(url)[:80]} lang isn't de or en")
+            print(f"SKIP {str(get_response.url)[:80]} lang isn't de or en")
             return set()
 
         self._db_conn.execute(
             sqlalchemy.insert(db.DOCUMENTS_TABLE).values(
-                url=str(url),
+                url=str(get_response.url),
                 content=self._NEWLINE_REGEX.sub(b"\n", html.tostring(dom)),
             )
         )
 
-        return get_links(url, dom)
+        return get_links(get_response.url, dom)
 
     async def worker(self):
         """Work for eternity or until stop is called."""

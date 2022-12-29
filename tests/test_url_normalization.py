@@ -14,10 +14,11 @@ def _check(pre: str, post: str, custom: bool = False):
 
 def test_url_normilization():
     """
-    Test the URL normalizazion.
+    Test the URL normalization.
 
     Based on https://en.wikipedia.org/wiki/URI_normalization
     """
+    # Check for normalization
     _check("http://example.com/foo%2a", "http://example.com/foo%2A")
     _check("HTTP://User@Example.COM/Foo", "http://User@example.com/Foo")
     _check("http://example.com/%7Efoo", "http://example.com/~foo", True)
@@ -37,18 +38,15 @@ def test_url_normilization():
         True,
     )
     _check(
-        "http://example.com/a/foo//bar.html",
-        "http://example.com/a/foo/bar.html",
-        True,
-    )
-    _check(
-        "http://example.com/foo///bar.html",
-        "http://example.com/foo/bar.html",
-        True,
-    )
-    _check(
         "http://example.com/display?lang=en&article=fred",
         "http://example.com/display?article=fred&lang=en",
         True,
     )
     _check("http://example.com/display?", "http://example.com/display", True)
+
+    # Check that some URLs are still working
+    _check(
+        "https://web.archive.org/web/20220101000646/http://example.com",
+        "https://web.archive.org/web/20220101000646/http%3A//example.com",
+        True,
+    )

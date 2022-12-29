@@ -10,7 +10,6 @@ from httpx import URL
 from lxml import etree, html
 from lxml.html.clean import Cleaner
 
-_DOUBLE_SLASH_REGEX = re.compile("//+")
 _BODY_XPATH = etree.XPath("//body")
 _LANG_XPATH = etree.XPath("//*[@lang]")
 _HREF_XPATH = etree.XPath("//a[not(@rel) or @rel!='nofollow']/@href")
@@ -48,25 +47,13 @@ def normalize_url(url: URL, history: list[httpx.Response] = []) -> URL:
 
     This function performs the following normalizations in addition to the
     normalization performed by httpx's URL:
-        - Add trailing slash to URL without path.
-        - Remove trailing slash from all URL except for URL that redirect back
-          to the URL with the trailing slash.
-        - Replace double or multiple slashes in the path by a single slash.
+        - Add trailing slash to URLs without path.
+        - Remove trailing slash from all other URLs.
         - Remove any trailing '?' without query parameters.
         - Sort the query parameters.
     """
-    if not any(
-        (
-            response.is_redirect
-            and response.url.netloc == url.netloc
-            and response.url.path + "/" == url.path
-        )
-        for response in history
-    ):
-        url = url.copy_with(path=url.path.rstrip("/"))
-
     return url.copy_with(
-        path=_DOUBLE_SLASH_REGEX.sub("/", url.path) or "/",
+        path=url.path.rstrip("/") or "/",
         query=b"&".join(sorted(url.query.split(b"&"))) or None,
         fragment=None,
     )
