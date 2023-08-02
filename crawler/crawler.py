@@ -17,85 +17,12 @@ from .robots import RobotsFileTable
 from .utils import HTML_CLEANER, get_lang, get_links, normalize_url
 
 
-class _CrawlerState(NamedTuple):
-    robots_file_table: RobotsFileTable
-    pending_urls: BucketSet[URL, bytes]
-    timeouts: dict[bytes, float]
-
-
-class Crawler:
-    """The crawler."""
-
-    _NEWLINE_REGEX = re.compile(rb"\n+")
-
-    @staticmethod
-    def _get_netloc(url: URL) -> bytes:
-        return url.netloc
-
-    def __init__(self):
-        """Connect to database and init HTTPXClient."""
-        self._db_conn = db.ENGINE.connect()
-        self._httpx_client = HTTPXClient()
-        self._robots_file_table = RobotsFileTable(self._httpx_client)
-
-        self._pending_urls = BucketSet(self._get_netloc)
-        self._timeouts: dict[bytes, float] = {}
-
-        self._stopping = False
-
-    async def __aenter__(self):
-        """Call enter method of database connection and HTTPXClient."""
-        self._db_conn.__enter__()
-        await self._httpx_client.__aenter__()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        """Close database connection and HTTPXClient."""
-        self._db_conn.__exit__(exc_type, exc, tb)
-        await self._httpx_client.__aexit__(exc_type, exc, tb)
-
-    def __getstate__(self) -> _CrawlerState:
-        """Return state used by pickle."""
-        return _CrawlerState(
-            self._robots_file_table, self._pending_urls, self._timeouts
-        )
-
-    def __setstate__(self, state: _CrawlerState):
-        """Restore state loaded by pickle."""
-        self.__init__()
-
-        state.robots_file_table._client = self._httpx_client
-
-        self._robots_file_table = state.robots_file_table
-        self._pending_urls = state.pending_urls
-        self._timeouts = state.timeouts
-
-    def add_url(self, url: str):
-        """Add a URL passed as str to the pending URLs."""
-        self._pending_urls.add(normalize_url(URL(url)))
-
-    def load_urls_db(self) -> bool:
-        """Load the URLs out of the database (slow)."""
-        count = self._db_conn.execute(
-            sqlalchemy.func.count(db.DOCUMENTS_TABLE.c.url)
-        ).scalar()
-        if count is None or count <= 0:
-            return False
-
-        for document in tqdm(
-            self._db_conn.execute(sqlalchemy.select(db.DOCUMENTS_TABLE)),
-            total=count,
-            ncols=100,
-        ):
-            dom = etree.fromstring(document.content, parser=html.html_parser)
-            self._pending_urls.update(get_links(URL(document.url), dom))
-
-        return True
-
-    def stop(self):
-        """Start stopping all workers."""
-        print("Stopping...")
-        self._stopping = True
+class _SingleNetlocCrawler:
+    def __init__(self, netloc: bytes, db_conn, httpx_client: HTTPXClient, robots_file_table: RobotsFileTable):
+        self._netloc = netloc
+        self._db_conn = db_conn
+        self._httpx_client = httpx_client
+        self._robots_file_table = robots_file_table
 
     def _exists(self, url: URL):
         return (
@@ -159,6 +86,88 @@ class Crawler:
 
         return get_links(response.url, dom)
 
+
+class _CrawlerState(NamedTuple):
+    robots_file_table: RobotsFileTable
+    pending_urls: BucketSet[URL, bytes]
+    timeouts: dict[bytes, float]
+
+
+class Crawler:
+    """The crawler."""
+
+    _NEWLINE_REGEX = re.compile(rb"\n+")
+
+    @staticmethod
+    def _get_netloc(url: URL) -> bytes:
+        return url.netloc
+
+    def __init__(self):
+        """Connect to database and init HTTPXClient."""
+        self._db_conn = db.ENGINE.connect()
+        self._httpx_client = HTTPXClient()
+        self._robots_file_table = RobotsFileTable(self._httpx_client)
+
+        self._pending_urls = BucketSet(self._get_netloc)
+        self._crawlers: dict[bytes, _SingleNetlocCrawler] = {}
+        self._timeouts: dict[bytes, float] = {}
+
+        self._stopping = False
+
+    async def __aenter__(self):
+        """Call enter method of database connection and HTTPXClient."""
+        self._db_conn.__enter__()
+        await self._httpx_client.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        """Close database connection and HTTPXClient."""
+        self._db_conn.__exit__(exc_type, exc, tb)
+        await self._httpx_client.__aexit__(exc_type, exc, tb)
+
+    def __getstate__(self) -> _CrawlerState:
+        """Return state used by pickle."""
+        return _CrawlerState(
+            self._robots_file_table, self._pending_urls, self._timeouts
+        )
+
+    def __setstate__(self, state: _CrawlerState):
+        """Restore state loaded by pickle."""
+        self.__init__()
+
+        state.robots_file_table._client = self._httpx_client
+
+        self._robots_file_table = state.robots_file_table
+        self._pending_urls = state.pending_urls
+        self._timeouts = state.timeouts
+
+    def add_url(self, url: str):
+        """Add a URL passed as str to the pending URLs."""
+        self._pending_urls.add(normalize_url(URL(url)))
+
+    def load_urls_db(self) -> bool:
+        """Load the URLs out of the database (slow)."""
+        count = self._db_conn.execute(
+            sqlalchemy.func.count(db.DOCUMENTS_TABLE.c.url)
+        ).scalar()
+        if count is None or count <= 0:
+            return False
+
+        for document in tqdm(
+            self._db_conn.execute(sqlalchemy.select(db.DOCUMENTS_TABLE)),
+            total=count,
+            ncols=100,
+        ):
+            dom = etree.fromstring(document.content, parser=html.html_parser)
+            self._pending_urls.update(get_links(URL(document.url), dom))
+
+        return True
+
+    def stop(self):
+        """Start stopping all workers."""
+        print("Stopping...")
+        self._stopping = True
+
     async def run(self):
         """Work for eternity or until stop is called."""
         tasks: dict[asyncio.Task, bytes] = {}
@@ -174,7 +183,10 @@ class Crawler:
                     if self._timeouts.get(netloc, 0) > time.time():
                         continue
 
-                    tasks[asyncio.create_task(self._load_page(url))] = netloc
+                    if netloc not in self._crawlers:
+                        self._crawlers[netloc] = _SingleNetlocCrawler(netloc, self._db_conn, self._httpx_client, self._robots_file_table)
+
+                    tasks[asyncio.create_task(self._crawlers[netloc]._load_page(url))] = netloc
 
                 done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
 
