@@ -39,11 +39,9 @@ class Crawler:
         self._robots_file_table = RobotsFileTable(self._httpx_client)
 
         self._pending_urls = BucketSet(self._get_netloc)
-        self._active_urls: set[URL] = set()
         self._timeouts: dict[bytes, float] = {}
 
         self._stopping = False
-        self._condition = asyncio.Condition()
 
     async def __aenter__(self):
         """Call enter method of database connection and HTTPXClient."""
@@ -58,8 +56,6 @@ class Crawler:
 
     def __getstate__(self) -> _CrawlerState:
         """Return state used by pickle."""
-        if self._active_urls:
-            raise RuntimeError("Can't get state of active crawler.")
         return _CrawlerState(
             self._robots_file_table, self._pending_urls, self._timeouts
         )
@@ -96,20 +92,10 @@ class Crawler:
 
         return True
 
-    async def stop(self):
+    def stop(self):
         """Start stopping all workers."""
         print("Stopping...")
         self._stopping = True
-        async with self._condition:
-            self._condition.notify_all()
-
-    def _update_timeouts(self):
-        ctime = time.time()
-        self._timeouts = {
-            netloc: timeout
-            for netloc, timeout in self._timeouts.items()
-            if timeout > ctime
-        }
 
     def _exists(self, url: URL):
         return (
@@ -173,33 +159,27 @@ class Crawler:
 
         return get_links(response.url, dom)
 
-    async def worker(self):
+    async def run(self):
         """Work for eternity or until stop is called."""
-        while not self._stopping:
-            while True:
-                self._update_timeouts()
+        tasks: dict[asyncio.Task, bytes] = {}
 
-                netlocs = {url.netloc for url in self._active_urls}
-                urls = self._pending_urls.key_difference(
-                    netlocs.union(self._timeouts.keys())
-                )
-                if urls:
-                    break
+        try:
+            while not self._stopping:
+                for url in self._pending_urls.key_difference(tasks.values()):
+                    if len(tasks) >= 1024:
+                        break
 
-                async with self._condition:
-                    await self._condition.wait()
-                if self._stopping:
-                    return
+                    netloc = self._get_netloc(url)
 
-            url = urls.pop()
-            self._pending_urls.remove(url)
-            self._active_urls.add(url)
+                    if self._timeouts.get(netloc, 0) > time.time():
+                        continue
 
-            self._pending_urls.update(
-                (await self._load_page(url)).difference(self._active_urls)
-            )
+                    tasks[asyncio.create_task(self._load_page(url))] = netloc
 
-            self._active_urls.remove(url)
+                done, _ = await asyncio.wait(tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
 
-            async with self._condition:
-                self._condition.notify_all()
+                for task in done:
+                    tasks.pop(task)
+                    self._pending_urls.update(task.result())
+        finally:
+            await asyncio.wait(tasks.keys(), return_when=asyncio.ALL_COMPLETED)

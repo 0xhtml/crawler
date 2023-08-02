@@ -18,14 +18,10 @@ async def main():
             crawler.add_url("https://en.wikipedia.org")
 
     async with crawler:
-        workers = [asyncio.create_task(crawler.worker()) for _ in range(10)]
-
         loop = asyncio.get_running_loop()
-        loop.add_signal_handler(
-            signal.SIGINT, lambda: asyncio.create_task(crawler.stop())
-        )
+        loop.add_signal_handler(signal.SIGINT, crawler.stop)
 
-        await asyncio.wait(workers)
+        await crawler.run()
 
     with open("state.pkl", "wb") as file:
         pickle.dump(crawler, file)
