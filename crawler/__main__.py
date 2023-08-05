@@ -1,10 +1,11 @@
 """Crawl the web."""
 
 import asyncio
-import signal
 import pickle
+import signal
 
 from .crawler import Crawler
+from .http import URL
 
 
 async def main():
@@ -15,7 +16,7 @@ async def main():
     except FileNotFoundError:
         crawler = Crawler()
         if not crawler.load_urls_db():
-            crawler.add_url("https://en.wikipedia.org")
+            crawler.add_url(URL.from_string("https://en.wikipedia.org"))
 
     async with crawler:
         loop = asyncio.get_running_loop()

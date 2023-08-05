@@ -6,25 +6,32 @@ import time
 from typing import Any
 
 import sqlalchemy
-from httpx import URL
 from lxml import etree, html
 from tqdm import tqdm
 
 from . import db
-from .bucketset import BucketSet
 from .httpxclient import HTTPXClient
+from .http import URL, Netloc
 from .robots import RobotsFile
-from .utils import HTML_CLEANER, get_lang, get_links, normalize_url
+from .utils import HTML_CLEANER, get_lang, get_links
 
 
 class _SingleNetlocCrawler:
     _NEWLINE_REGEX = re.compile(rb"\n+")
 
-    def __init__(self):
+    def __init__(self, netloc: Netloc):
+        self._netloc = netloc
         self._robots_file = RobotsFile()
+        self._pending_urls: set[URL] = set()
         self._timeout = 0
 
-    def _exists(self, url: URL, db_conn):
+    def add_url(self, url: URL):
+        self._pending_urls.add(url)
+
+    def ready(self) -> bool:
+        return bool(self._pending_urls) and self._timeout < time.time()
+
+    def _exists(self, url: str, db_conn):
         return (
             db_conn.execute(
                 sqlalchemy.select(db.DOCUMENTS_TABLE).filter_by(url=str(url))
@@ -32,16 +39,17 @@ class _SingleNetlocCrawler:
             is not None
         )
 
-    async def _load_page(
-        self, url: URL, client: HTTPXClient, db_conn
-    ) -> set[URL]:
+    async def _load_page(self, client: HTTPXClient, db_conn) -> set[URL]:
+        url = self._pending_urls.pop()
+
         if not await self._robots_file.can_fetch(url, client):
             return set()
 
-        self._timeout = self._robots_file.timeout(url)
+        self._timeout = self._robots_file.timeout()
 
         response = await client.retrying_get(
-            url, {"accept": "text/html", "accept-language": "de,en"}
+            url.to_httpx_url(),
+            {"accept": "text/html", "accept-language": "de,en"},
         )
         if response is None:
             return set()
@@ -63,7 +71,7 @@ class _SingleNetlocCrawler:
             )
             return set()
 
-        if self._exists(response.url, db_conn):
+        if self._exists(str(response.url), db_conn):
             return set()
 
         dom = etree.fromstring(response.content, parser=html.html_parser)
@@ -84,20 +92,19 @@ class _SingleNetlocCrawler:
             )
         )
 
-        return get_links(response.url, dom)
+        return get_links(URL.from_httpx_url(response.url), dom)
 
 
 class Crawler:
     """The crawler."""
 
     @staticmethod
-    def _get_netloc(url: URL) -> bytes:
+    def _get_netloc(url: URL) -> Netloc:
         return url.netloc
 
     def __getstate__(self) -> dict[str, Any]:
         """Return state used by pickle."""
         return {
-            "_pending_urls": self._pending_urls,
             "_crawlers": self._crawlers,
         }
 
@@ -109,9 +116,9 @@ class Crawler:
         self._stopping = False
 
     def __init__(self):
+        """Initialize the crawler w/ empty backlog and no connections."""
         self.__setstate__({})
-        self._pending_urls = BucketSet(self._get_netloc)
-        self._crawlers: dict[bytes, _SingleNetlocCrawler] = {}
+        self._crawlers: dict[Netloc, _SingleNetlocCrawler] = {}
 
     async def __aenter__(self):
         """Call enter method of database connection and HTTPXClient."""
@@ -124,9 +131,12 @@ class Crawler:
         self._db_conn.__exit__(exc_type, exc, tb)
         await self._httpx_client.__aexit__(exc_type, exc, tb)
 
-    def add_url(self, url: str):
+    def add_url(self, url: URL):
         """Add a URL passed as str to the pending URLs."""
-        self._pending_urls.add(normalize_url(URL(url)))
+        url = url.normalize()
+        if url.netloc not in self._crawlers:
+            self._crawlers[url.netloc] = _SingleNetlocCrawler(url.netloc)
+        self._crawlers[url.netloc].add_url(url)
 
     def load_urls_db(self) -> bool:
         """Load the URLs out of the database (slow)."""
@@ -142,7 +152,8 @@ class Crawler:
             ncols=100,
         ):
             dom = etree.fromstring(document.content, parser=html.html_parser)
-            self._pending_urls.update(get_links(URL(document.url), dom))
+            for link in get_links(URL.from_string(document.url), dom):
+                self.add_url(link)
 
         return True
 
@@ -153,27 +164,22 @@ class Crawler:
 
     async def run(self):
         """Work for eternity or until stop is called."""
-        tasks: dict[asyncio.Task, bytes] = {}
+        tasks: dict[asyncio.Task, Netloc] = {}
 
         try:
             while not self._stopping:
-                for url in self._pending_urls.key_difference(tasks.values()):
-                    if len(tasks) >= 1024:
+                for netloc in set(self._crawlers.keys()).difference(
+                    tasks.values()
+                ):
+                    if len(tasks) >= 4:
                         break
 
-                    netloc = self._get_netloc(url)
-
-                    if netloc not in self._crawlers:
-                        self._crawlers[netloc] = _SingleNetlocCrawler()
                     crawler = self._crawlers[netloc]
-
-                    if crawler._timeout > time.time():
+                    if not crawler.ready():
                         continue
 
                     task = asyncio.create_task(
-                        crawler._load_page(
-                            url, self._httpx_client, self._db_conn
-                        )
+                        crawler._load_page(self._httpx_client, self._db_conn)
                     )
                     tasks[task] = netloc
 
@@ -183,6 +189,7 @@ class Crawler:
 
                 for task in done:
                     tasks.pop(task)
-                    self._pending_urls.update(task.result())
+                    for url in task.result():
+                        self.add_url(url)
         finally:
             await asyncio.wait(tasks.keys(), return_when=asyncio.ALL_COMPLETED)

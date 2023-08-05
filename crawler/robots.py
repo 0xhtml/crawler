@@ -4,16 +4,16 @@ import math
 import time
 import urllib.robotparser
 
-from httpx import URL
-
 from .httpxclient import USER_AGENT, HTTPXClient
+from .http import URL, Netloc
 
 
 class RobotsFile(urllib.robotparser.RobotFileParser):
     """HTTPX AsyncClient supporting RobotFileParser."""
 
-    async def _load(self, url: URL, client: HTTPXClient):
-        response = await client.retrying_get(url)
+    async def _load(self, netloc: Netloc, client: HTTPXClient):
+        url = URL(netloc.host, netloc.port, "/robots.txt", None)
+        response = await client.retrying_get(url.to_httpx_url())
 
         if response is not None and response.is_success:
             self.parse(response.text.splitlines())
@@ -32,13 +32,10 @@ class RobotsFile(urllib.robotparser.RobotFileParser):
     async def can_fetch(self, url: URL, client: HTTPXClient) -> bool:
         """Check if robot is allowed to fetch URL."""
         if self.mtime() + 24 * 60 * 60 < time.time():
-            await self._load(
-                URL(scheme=url.scheme, netloc=url.netloc, path="/robots.txt"),
-                client,
-            )
+            await self._load(url.netloc, client)
         return super().can_fetch(USER_AGENT, str(url))
 
-    def timeout(self, url: URL) -> float:
+    def timeout(self) -> float:
         """Get the timeout for the next request."""
         assert self.mtime()
 
