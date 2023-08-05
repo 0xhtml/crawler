@@ -18,14 +18,15 @@ async def main():
         if not crawler.load_urls_db():
             crawler.add_url(URL.from_string("https://en.wikipedia.org"))
 
-    async with crawler:
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, crawler.stop)
+    try:
+        async with crawler:
+            loop = asyncio.get_running_loop()
+            loop.add_signal_handler(signal.SIGINT, crawler.stop)
 
-        await crawler.run()
-
-    with open("state.pkl", "wb") as file:
-        pickle.dump(crawler, file)
+            await crawler.run()
+    finally:
+        with open("state.pkl", "wb") as file:
+            pickle.dump(crawler, file)
 
 
 if __name__ == "__main__":
