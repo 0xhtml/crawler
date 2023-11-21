@@ -1,5 +1,6 @@
 """Utilities for working with URLs and pages."""
 
+import contextlib
 import math
 
 import fasttext
@@ -48,13 +49,11 @@ def get_lang(dom: html.HtmlElement) -> str:
 
     body = (_BODY_XPATH(dom) or [dom])[0]
 
-    text = " ".join(
-        html.tostring(body, method="text", encoding="unicode").split()
-    )
+    text = " ".join(html.tostring(body, method="text", encoding="unicode").split())
     start = max(0, math.floor(len(text) / 3) - 512)
     text = text[start : start + 1023]
 
-    return _MODEL.predict(text)[0][0].replace("__label__", "")
+    return _MODEL.predict(text)[0][0].removeprefix("__label__")
 
 
 def get_links(url: URL, dom: html.HtmlElement) -> set[URL]:
@@ -62,9 +61,7 @@ def get_links(url: URL, dom: html.HtmlElement) -> set[URL]:
     links = set()
 
     for href in _HREF_XPATH(dom):
-        try:
+        with contextlib.suppress(InvalidURLError):
             links.add(url.join(href))
-        except InvalidURLError:
-            pass
 
     return links

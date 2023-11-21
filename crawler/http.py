@@ -1,5 +1,6 @@
 """HTTP client."""
 
+import ssl
 from typing import NamedTuple, Optional
 from urllib.parse import quote, unquote
 
@@ -7,11 +8,11 @@ import httpx
 import rfc3986
 import rfc3986.normalizers
 
+USER_AGENT = "crawler"
+
 
 class InvalidURLError(Exception):
     """Raised when an invalid URL is encountered."""
-
-    pass
 
 
 class Netloc(NamedTuple):
@@ -19,6 +20,12 @@ class Netloc(NamedTuple):
 
     host: str
     port: Optional[int]
+
+    def __str__(self) -> str:
+        """Return string representation of the netloc."""
+        if self.port is None:
+            return self.host
+        return f"{self.host}:{self.port}"
 
 
 class URL(NamedTuple):
@@ -53,6 +60,7 @@ class URL(NamedTuple):
 
     @classmethod
     def from_httpx_url(cls, httpx_url: httpx.URL) -> "URL":
+        """Create a URL from a httpx URL."""
         return cls.from_rfc3986_uri(
             rfc3986.URIReference(
                 httpx_url.scheme,
@@ -60,19 +68,16 @@ class URL(NamedTuple):
                 httpx_url.path,
                 httpx_url.query.decode(),
                 None,
-            )
+            ),
         )
 
     @classmethod
     def from_string(cls, url_string: str) -> "URL":
         """Create a URL from a string."""
-        return cls.from_rfc3986_uri(
-            rfc3986.URIReference.from_string(url_string)
-        )
+        return cls.from_rfc3986_uri(rfc3986.URIReference.from_string(url_string))
 
     def normalize(self) -> "URL":
-        """
-        Apply a few more extreme normalizations to the URL.
+        """Apply a few more extreme normalizations to the URL.
 
         - Remove trailing slashes
         - Sort query parameters
@@ -81,17 +86,8 @@ class URL(NamedTuple):
             self.host,
             self.port,
             self.path.rstrip("/") or "/",
-            None
-            if self.query is None
-            else "&".join(sorted(self.query.split("&"))),
+            None if self.query is None else "&".join(sorted(self.query.split("&"))),
         )
-
-    @property
-    def authority(self) -> str:
-        """Authority of the URL."""
-        if self.port is None:
-            return self.host
-        return f"{self.host}:{self.port}"
 
     @property
     def netloc(self) -> Netloc:
@@ -127,32 +123,87 @@ class URL(NamedTuple):
         if url.host is not None:
             return self.from_rfc3986_uri(url.copy_with(scheme="https"))
 
-        if url.path is None:
-            raise InvalidURLError(url_string)
+        if url.path is not None:
+            if url.path.startswith("/"):
+                return self.from_rfc3986_uri(
+                    url.copy_with(scheme="https", authority=str(self.netloc)),
+                )
 
-        if url.path.startswith("/"):
+            path = self.path or ""
             return self.from_rfc3986_uri(
-                url.copy_with(scheme="https", authority=self.authority)
+                url.copy_with(
+                    scheme="https",
+                    authority=str(self.netloc),
+                    path=f"{path[:path.rfind('/')]}/{url.path}",
+                ),
             )
 
-        path = self.path or ""
-        return self.from_rfc3986_uri(
-            url.copy_with(
-                scheme="https",
-                authority=self.authority,
-                path=f"{path[:path.rfind('/')]}/{url.path}",
+        if url.query is not None:
+            return self.from_rfc3986_uri(
+                url.copy_with(
+                    scheme="https",
+                    authority=str(self.netloc),
+                    path=self.path,
+                    query=url.query,
+                ),
             )
-        )
+
+        raise InvalidURLError(url_string)
 
     def __str__(self) -> str:
         """Convert the URL back to a string."""
-        return f"https://{self.authority}{self.target}"
+        return f"https://{self.netloc}{self.target}"
 
     def to_httpx_url(self) -> httpx.URL:
-        """Convert the URL to a httpx URL."""
+        """Convert the URL to a httpx.URL."""
         return httpx.URL(
             scheme="https",
             host=self.host,
             port=self.port,
             raw_path=self.target.encode(),
         )
+
+
+HTTPError = (
+    httpx.NetworkError,
+    httpx.ProtocolError,
+    httpx.TimeoutException,
+    httpx.TooManyRedirects,
+    ssl.SSLError,
+)
+
+
+class Pool(httpx.AsyncClient):
+    """Async connection pool with custom get method."""
+
+    def __init__(self) -> None:
+        """Initialize pool."""
+        super().__init__(
+            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "gzip"},
+            timeout=httpx.Timeout(connect=4, write=1, read=10, pool=None),
+        )
+
+    async def get(
+        self,
+        url: URL,
+        max_redirects: int = 5,
+    ) -> httpx.Response:
+        """Perform a GET request following redirects to same netloc."""
+        request = httpx.Request("GET", url.to_httpx_url())
+
+        while (response := await self.send(request)).is_redirect:
+            assert response.next_request is not None
+
+            max_redirects -= 1
+            if max_redirects < 0:
+                raise httpx.TooManyRedirects(
+                    "Exceeded maximum allowed redirects.",
+                    request=request,
+                )
+
+            if URL.from_httpx_url(response.next_request.url).netloc != url.netloc:
+                break
+
+            request = response.next_request
+
+        return response

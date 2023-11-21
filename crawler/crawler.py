@@ -1,195 +1,173 @@
 """The crawler that can crawl the internet."""
 
 import asyncio
+import contextlib
 import re
 import time
 from typing import Any
 
+import httpx
 import sqlalchemy
-from lxml import etree, html
-from tqdm import tqdm
+from lxml import html
 
 from . import db
-from .httpxclient import HTTPXClient
-from .http import URL, Netloc
-from .robots import RobotsFile
+from .http import URL, HTTPError, Netloc, Pool
+from .robots import RobotsFileTable
 from .utils import HTML_CLEANER, get_lang, get_links
 
+_LANG_REGEX = re.compile(r"\b(?:en|de)\b", re.A | re.I)
+_NEWLINE_REGEX = re.compile(rb"\n+")
+_NOFOLLOW_REGEX = re.compile(r"\bnofollow\b", re.A | re.I)
 
-class _SingleNetlocCrawler:
-    _NEWLINE_REGEX = re.compile(rb"\n+")
 
-    def __init__(self, netloc: Netloc):
-        self._netloc = netloc
-        self._robots_file = RobotsFile()
-        self._pending_urls: set[URL] = set()
-        self._timeout = 0
+def _check_headers(response: httpx.Response) -> bool:
+    if not response.is_success:
+        print(f"SKIP {str(response.url)[:80]} HTTP {response.status_code}")
+        return False
 
-    def add_url(self, url: URL):
-        self._pending_urls.add(url)
+    content_type = response.headers.get("Content-Type", "")
+    if not content_type.startswith("text/html"):
+        print(f"SKIP {str(response.url)[:80]} not html ({content_type})")
+        return False
 
-    def ready(self) -> bool:
-        return bool(self._pending_urls) and self._timeout < time.time()
+    robots = response.headers.get("X-Robots-Tag", "")
+    if _NOFOLLOW_REGEX.search(robots):
+        print(f"SKIP {str(response.url)[:80]} nofollow ({robots})")
+        return False
 
-    def _exists(self, url: str, db_conn):
-        return (
-            db_conn.execute(
-                sqlalchemy.select(db.DOCUMENTS_TABLE).filter_by(url=str(url))
-            ).first()
-            is not None
-        )
+    lang = response.headers.get("Content-Language", "en")
+    if not _LANG_REGEX.search(lang):
+        print(f"SKIP {str(response.url)[:80]} lang isn't en or de ({lang})")
+        return False
 
-    async def _load_page(self, client: HTTPXClient, db_conn) -> set[URL]:
-        url = self._pending_urls.pop()
-
-        if not await self._robots_file.can_fetch(url, client):
-            return set()
-
-        self._timeout = self._robots_file.timeout()
-
-        response = await client.retrying_get(
-            url.to_httpx_url(),
-            {"accept": "text/html", "accept-language": "de,en"},
-        )
-        if response is None:
-            return set()
-
-        if not response.is_success:
-            print(f"SKIP {str(response.url)[:80]} HTTP {response.status_code}")
-            return set()
-
-        content_type = response.headers.get("content-type", "")
-        if not content_type.startswith("text/html"):
-            print(f"SKIP {str(response.url)[:80]} != html ({content_type})")
-            return set()
-
-        x_robots_tag = response.headers.get("x-robots-tag", "")
-        if "nofollow" in x_robots_tag:
-            print(
-                f"SKIP {str(response.url)[:80]} nofollow "
-                f"(X-Robots-Tag: {x_robots_tag})"
-            )
-            return set()
-
-        if self._exists(str(response.url), db_conn):
-            return set()
-
-        dom = etree.fromstring(response.content, parser=html.html_parser)
-        if dom is None:
-            print(f"SKIP {str(response.url)[:80]} dom is None")
-            return set()
-
-        HTML_CLEANER(dom)
-
-        if get_lang(dom) not in {"de", "en"}:
-            print(f"SKIP {str(response.url)[:80]} lang isn't de or en")
-            return set()
-
-        db_conn.execute(
-            sqlalchemy.insert(db.DOCUMENTS_TABLE).values(
-                url=str(response.url),
-                content=self._NEWLINE_REGEX.sub(b"\n", html.tostring(dom)),
-            )
-        )
-
-        return get_links(URL.from_httpx_url(response.url), dom)
+    return True
 
 
 class Crawler:
     """The crawler."""
 
-    @staticmethod
-    def _get_netloc(url: URL) -> Netloc:
-        return url.netloc
-
     def __getstate__(self) -> dict[str, Any]:
         """Return state used by pickle."""
         return {
-            "_crawlers": self._crawlers,
+            "_robots_file_table": self._robots_file_table,
+            "_timeouts": self._timeouts,
+            "_urls": self._urls,
         }
 
-    def __setstate__(self, state: dict[str, Any]):
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore state used by pickle."""
-        self.__dict__.update(state)
+        self._pool = Pool()
         self._db_conn = db.ENGINE.connect()
-        self._httpx_client = HTTPXClient()
         self._stopping = False
 
-    def __init__(self):
-        """Initialize the crawler w/ empty backlog and no connections."""
-        self.__setstate__({})
-        self._crawlers: dict[Netloc, _SingleNetlocCrawler] = {}
+        self.__dict__.update(state)
 
-    async def __aenter__(self):
-        """Call enter method of database connection and HTTPXClient."""
+    def __init__(self) -> None:
+        """Initialize the crawler w/ empty backlog and no connections."""
+        self._robots_file_table = RobotsFileTable()
+        self._timeouts: dict[Netloc, float] = {}
+        self._urls: set[URL] = set()
+
+        self.__setstate__({})
+
+    async def __aenter__(self) -> "Crawler":
+        """Call enter method of database connection."""
         self._db_conn.__enter__()
-        await self._httpx_client.__aenter__()
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
-        """Close database connection and HTTPXClient."""
-        self._db_conn.__exit__(exc_type, exc, tb)
-        await self._httpx_client.__aexit__(exc_type, exc, tb)
+    async def __aexit__(self, et, exc, tb) -> None:
+        """Close database connection and all open http connections."""
+        await self._pool.aclose()
+        self._db_conn.__exit__(et, exc, tb)
 
-    def add_url(self, url: URL):
-        """Add a URL passed as str to the pending URLs."""
+    def add_url(self, url: URL) -> None:
+        """Add a URL to the pending URLs."""
         url = url.normalize()
-        if url.netloc not in self._crawlers:
-            self._crawlers[url.netloc] = _SingleNetlocCrawler(url.netloc)
-        self._crawlers[url.netloc].add_url(url)
+        self._urls.add(url)
 
-    def load_urls_db(self) -> bool:
-        """Load the URLs out of the database (slow)."""
-        count = self._db_conn.execute(
-            sqlalchemy.func.count(db.DOCUMENTS_TABLE.c.url)
-        ).scalar()
-        if count is None or count <= 0:
-            return False
-
-        for document in tqdm(
-            self._db_conn.execute(sqlalchemy.select(db.DOCUMENTS_TABLE)),
-            total=count,
-            ncols=100,
-        ):
-            dom = etree.fromstring(document.content, parser=html.html_parser)
-            for link in get_links(URL.from_string(document.url), dom):
-                self.add_url(link)
-
-        return True
-
-    def stop(self):
+    def stop(self) -> None:
         """Start stopping all workers."""
         print("Stopping...")
         self._stopping = True
 
-    async def run(self):
-        """Work for eternity or until stop is called."""
-        tasks: dict[asyncio.Task, Netloc] = {}
+    async def _load_page(self, url: URL) -> set[URL]:
+        robots_file = await self._robots_file_table.get(url.netloc, self._pool)
+
+        if not robots_file.can_fetch(url):
+            return set()
+
+        self._timeouts[url.netloc] = robots_file.timeout()
 
         try:
-            while not self._stopping:
-                for netloc in set(self._crawlers.keys()).difference(
-                    tasks.values()
-                ):
-                    if len(tasks) >= 4:
-                        break
+            response = await self._pool.get(url)
+        except HTTPError as e:
+            print(f"SKIP {str(url)[:80]} {e.__class__.__name__}: {e}")
+            return set()
 
-                    crawler = self._crawlers[netloc]
-                    if not crawler.ready():
-                        continue
+        if not _check_headers(response):
+            return set()
 
-                    task = asyncio.create_task(
-                        crawler._load_page(self._httpx_client, self._db_conn)
-                    )
-                    tasks[task] = netloc
+        url = URL.from_httpx_url(response.url)
 
-                done, _ = await asyncio.wait(
-                    tasks.keys(), return_when=asyncio.FIRST_COMPLETED
-                )
+        dom = html.document_fromstring(response.text)
+        if dom is None:
+            print(f"SKIP {str(url)[:80]} dom is None")
+            return set()
 
-                for task in done:
-                    tasks.pop(task)
-                    for url in task.result():
-                        self.add_url(url)
-        finally:
-            await asyncio.wait(tasks.keys(), return_when=asyncio.ALL_COMPLETED)
+        HTML_CLEANER(dom)
+
+        if get_lang(dom) not in {"de", "en"}:
+            print(f"SKIP {str(url)[:80]} lang isn't de or en")
+            return set()
+
+        if (
+            self._db_conn.execute(
+                sqlalchemy.select(db.DOCUMENTS_TABLE).filter_by(url=str(url)),
+            ).first()
+            is not None
+        ):
+            return set()
+
+        self._db_conn.execute(
+            sqlalchemy.insert(db.DOCUMENTS_TABLE).values(
+                url=str(url),
+                content=_NEWLINE_REGEX.sub(b"\n", html.tostring(dom)),
+            ),
+        )
+
+        return get_links(url, dom)
+
+    async def run(self) -> None:
+        """Run crawler."""
+        tasks: dict[asyncio.Task, URL] = {}
+
+        while not self._stopping:
+            for url in self._urls.copy():
+                if len(tasks) >= 15:
+                    break
+
+                if time.time() < self._timeouts.get(url.netloc, 0):
+                    continue
+
+                if url.netloc in {t.netloc for t in tasks.values()}:
+                    continue
+
+                self._urls.remove(url)
+                tasks[asyncio.create_task(self._load_page(url))] = url
+
+            done, _ = await asyncio.wait(
+                tasks.keys(),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for task in done:
+                tasks.pop(task)
+                self._urls.update(task.result())
+
+        for task, url in tasks.items():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            self._urls.add(url)
+
+        self._stopping = False
