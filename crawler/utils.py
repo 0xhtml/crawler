@@ -9,8 +9,7 @@ from lxml.html.clean import Cleaner
 
 from .http import URL, InvalidURLError
 
-_BODY_XPATH = etree.XPath("//body")
-_LANG_XPATH = etree.XPath("//*[@lang]")
+_LANG_XPATH = etree.XPath("//*/@lang")
 _BASE_XPATH = etree.XPath("//base/@href")
 _HREF_XPATH = etree.XPath("//a[not(@rel) or @rel!='nofollow']/@href")
 _MODEL = fasttext.load_model("lid.176.bin")
@@ -43,14 +42,10 @@ HTML_CLEANER = Cleaner(
 
 def get_lang(dom: html.HtmlElement) -> str:
     """Detect the language of a html page."""
-    langtags = _LANG_XPATH(dom)
+    if (langtags := _LANG_XPATH(dom)):
+        return langtags[0].split("-")[0].lower()
 
-    if langtags:
-        return langtags[0].attrib.get("lang").split("-")[0].lower()
-
-    body = (_BODY_XPATH(dom) or [dom])[0]
-
-    text = " ".join(html.tostring(body, method="text", encoding="unicode").split())
+    text = " ".join(dom.body.text_content().split())
     start = max(0, math.floor(len(text) / 3) - 512)
     text = text[start : start + 1023]
 
