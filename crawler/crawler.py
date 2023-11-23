@@ -106,38 +106,36 @@ class Crawler:
         self._stopping = True
 
     async def _load_page(self, url: URL) -> set[URL]:
-        robots_file = await self._robots_file_table.get(url.host, self._pool)
-
-        if not robots_file.can_fetch(url):
-            return set()
-
-        self._timeouts[url.host] = robots_file.timeout()
-
-        try:
-            response = await self._pool.get(url)
-        except HTTPError as e:
-            print(f"SKIP {str(url)[:80]} {e.__class__.__name__}: {e}")
-            return set()
-
-        if response.is_redirect:
-            assert response.next_request is not None
-            return {URL.from_httpx_url(response.next_request.url)}
-
-        url = URL.from_httpx_url(response.url)
-
-        if not _check_headers(response, f"SKIP {str(url)[:80]} "):
-            return set()
-
-        dom = html.document_fromstring(response.content)
-        if not _check_dom(dom, f"SKIP {str(url)[:80]} "):
-            return set()
-
         if (
             self._db_conn.execute(
                 sqlalchemy.select(db.DOCUMENTS_TABLE).filter_by(url=str(url)),
             ).first()
             is not None
         ):
+            return set()
+
+        robots_file = await self._robots_file_table.get(url.host, self._pool)
+
+        if not robots_file.can_fetch(url):
+            return set()
+
+        try:
+            response = await self._pool.get(url, True)
+        except HTTPError as e:
+            print(f"SKIP {str(url)[:80]} {e.__class__.__name__}: {e}")
+            return set()
+        finally:
+            self._timeouts[url.host] = robots_file.timeout()
+
+        if response.is_redirect:
+            assert response.next_request is not None
+            return {URL.from_httpx_url(response.next_request.url)}
+
+        if not _check_headers(response, f"SKIP {str(url)[:80]} "):
+            return set()
+
+        dom = html.document_fromstring(response.content)
+        if not _check_dom(dom, f"SKIP {str(url)[:80]} "):
             return set()
 
         self._db_conn.execute(

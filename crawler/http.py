@@ -101,6 +101,7 @@ class URL(NamedTuple):
 
 
 HTTPError = (
+    InvalidURLError,
     httpx.NetworkError,
     httpx.ProtocolError,
     httpx.TimeoutException,
@@ -119,28 +120,14 @@ class Pool(httpx.AsyncClient):
             timeout=httpx.Timeout(connect=4, write=1, read=10, pool=None),
         )
 
-    async def get(
-        self,
-        url: URL,
-        max_redirects: int = 5,
-    ) -> httpx.Response:
-        """Perform a GET request following redirects to same netloc."""
-        request = httpx.Request("GET", url.to_httpx_url())
+    async def get(self, url: URL, allow_redirect: bool) -> httpx.Response:
+        """Perform a GET request."""
+        response = await super().get(url.to_httpx_url())
 
-        while (response := await self.send(request)).is_redirect:
+        if response.is_redirect:
+            if not allow_redirect:
+                raise httpx.TooManyRedirects("Too many redirects")
             assert response.next_request is not None
-
-            max_redirects -= 1
-            if max_redirects < 0:
-                raise httpx.TooManyRedirects(
-                    "Exceeded maximum allowed redirects.",
-                    request=request,
-                )
-
             InvalidURLError.check(response.next_request.url)
-            if response.next_request.url.host != response.url.host:
-                break
-
-            request = response.next_request
 
         return response
