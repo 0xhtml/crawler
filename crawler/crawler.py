@@ -109,7 +109,7 @@ class Crawler:
 
         url = URL.from_httpx_url(response.url)
 
-        dom = html.document_fromstring(response.text)
+        dom = html.document_fromstring(response.content)
         if dom is None:
             print(f"SKIP {str(url)[:80]} dom is None")
             return set()
