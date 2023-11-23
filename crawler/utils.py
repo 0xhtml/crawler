@@ -11,6 +11,7 @@ from .http import URL, InvalidURLError
 
 _BODY_XPATH = etree.XPath("//body")
 _LANG_XPATH = etree.XPath("//*[@lang]")
+_BASE_XPATH = etree.XPath("//base/@href")
 _HREF_XPATH = etree.XPath("//a[not(@rel) or @rel!='nofollow']/@href")
 _MODEL = fasttext.load_model("lid.176.bin")
 
@@ -59,6 +60,13 @@ def get_lang(dom: html.HtmlElement) -> str:
 def get_links(url: URL, dom: html.HtmlElement) -> set[URL]:
     """Get all links of a page."""
     links = set()
+
+    if (base := _BASE_XPATH(dom)):
+        try:
+            url = url.join(base[-1])
+        except InvalidURLError:
+            print("{url}: invalid base URL: {base[-1]}")
+            return set()
 
     for href in _HREF_XPATH(dom):
         with contextlib.suppress(InvalidURLError):
