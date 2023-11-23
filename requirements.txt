@@ -3,4 +3,3 @@ fasttext-wheel==0.9.2
 httpx==0.25.1
 lxml==4.9.3
 pytest==7.4.3
-rfc3986==2.0.0

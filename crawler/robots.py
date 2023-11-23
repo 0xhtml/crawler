@@ -6,7 +6,7 @@ import urllib.robotparser
 
 import httpx
 
-from .http import URL, USER_AGENT, HTTPError, Netloc, Pool
+from .http import URL, USER_AGENT, HTTPError, Pool
 
 
 class RobotsFile(urllib.robotparser.RobotFileParser):
@@ -71,7 +71,7 @@ class RobotsFileTable:
             self._table[url] = await self._load(url, pool)
         return self._table[url]
 
-    async def get(self, netloc: Netloc, pool: Pool) -> RobotsFile:
+    async def get(self, host: str, pool: Pool) -> RobotsFile:
         """Get the robots.txt for the given netloc."""
-        url = URL(netloc.host, netloc.port, "/robots.txt", None)
+        url = URL(host, "/robots.txt", None)
         return await self._get(url, pool)

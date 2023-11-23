@@ -11,7 +11,7 @@ import sqlalchemy
 from lxml import html
 
 from . import db
-from .http import URL, HTTPError, Netloc, Pool
+from .http import URL, HTTPError, Pool
 from .robots import RobotsFileTable
 from .utils import HTML_CLEANER, get_lang, get_links
 
@@ -65,7 +65,7 @@ class Crawler:
     def __init__(self) -> None:
         """Initialize the crawler w/ empty backlog and no connections."""
         self._robots_file_table = RobotsFileTable()
-        self._timeouts: dict[Netloc, float] = {}
+        self._timeouts: dict[str, float] = {}
         self._urls: set[URL] = set()
 
         self.__setstate__({})
@@ -91,12 +91,12 @@ class Crawler:
         self._stopping = True
 
     async def _load_page(self, url: URL) -> set[URL]:
-        robots_file = await self._robots_file_table.get(url.netloc, self._pool)
+        robots_file = await self._robots_file_table.get(url.host, self._pool)
 
         if not robots_file.can_fetch(url):
             return set()
 
-        self._timeouts[url.netloc] = robots_file.timeout()
+        self._timeouts[url.host] = robots_file.timeout()
 
         try:
             response = await self._pool.get(url)
@@ -150,10 +150,10 @@ class Crawler:
                 if len(tasks) >= 15:
                     break
 
-                if time.time() < self._timeouts.get(url.netloc, 0):
+                if time.time() < self._timeouts.get(url.host, 0):
                     continue
 
-                if url.netloc in {t.netloc for t in tasks.values()}:
+                if any(t.host == url.host for t in tasks.values()):
                     continue
 
                 self._urls.remove(url)
