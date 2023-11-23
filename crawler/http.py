@@ -2,7 +2,7 @@
 
 import ssl
 from typing import Any, NamedTuple, Optional
-from urllib.parse import quote, unquote, urljoin
+from urllib.parse import quote, unquote, urljoin, _UNSAFE_URL_BYTES_TO_REMOVE
 
 import httpx
 
@@ -55,7 +55,13 @@ class URL(NamedTuple):
     @classmethod
     def from_string(cls, url: str) -> "URL":
         """Create a URL from a string."""
-        return cls.from_httpx_url(httpx.URL(url))
+        for b in _UNSAFE_URL_BYTES_TO_REMOVE:
+            url = url.replace(b, "")
+
+        try:
+            return cls.from_httpx_url(httpx.URL(url))
+        except httpx.InvalidURL as e:
+            raise InvalidURLError("url", url, str(e)) from e
 
     def normalize(self) -> "URL":
         """
