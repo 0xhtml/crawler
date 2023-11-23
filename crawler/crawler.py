@@ -20,24 +20,39 @@ _NEWLINE_REGEX = re.compile(rb"\n+")
 _NOFOLLOW_REGEX = re.compile(r"\bnofollow\b", re.A | re.I)
 
 
-def _check_headers(response: httpx.Response) -> bool:
+def _check_headers(response: httpx.Response, log_prefix: str) -> bool:
     if not response.is_success:
-        print(f"SKIP {str(response.url)[:80]} HTTP {response.status_code}")
+        print(f"{log_prefix}HTTP {response.status_code}")
         return False
 
     content_type = response.headers.get("Content-Type", "")
     if not content_type.startswith("text/html"):
-        print(f"SKIP {str(response.url)[:80]} not html ({content_type})")
+        print(f"{log_prefix}not html ({content_type})")
         return False
 
     robots = response.headers.get("X-Robots-Tag", "")
     if _NOFOLLOW_REGEX.search(robots):
-        print(f"SKIP {str(response.url)[:80]} nofollow ({robots})")
+        print(f"{log_prefix}nofollow ({robots})")
         return False
 
     lang = response.headers.get("Content-Language", "en")
     if not _LANG_REGEX.search(lang):
-        print(f"SKIP {str(response.url)[:80]} lang isn't en or de ({lang})")
+        print(f"{log_prefix}lang isn't en or de ({lang})")
+        return False
+
+    return True
+
+
+def _check_dom(dom: html.HtmlElement, log_prefix: str) -> bool:
+    if dom is None:
+        print(f"{log_prefix}dom is None")
+        return False
+
+    HTML_CLEANER(dom)
+
+    lang = get_lang(dom)
+    if lang not in {"en", "de"}:
+        print(f"{log_prefix}lang isn't en or de ({lang})")
         return False
 
     return True
@@ -108,20 +123,13 @@ class Crawler:
             assert response.next_request is not None
             return {URL.from_httpx_url(response.next_request.url)}
 
-        if not _check_headers(response):
-            return set()
-
         url = URL.from_httpx_url(response.url)
 
-        dom = html.document_fromstring(response.content)
-        if dom is None:
-            print(f"SKIP {str(url)[:80]} dom is None")
+        if not _check_headers(response, f"SKIP {str(url)[:80]} "):
             return set()
 
-        HTML_CLEANER(dom)
-
-        if get_lang(dom) not in {"de", "en"}:
-            print(f"SKIP {str(url)[:80]} lang isn't de or en")
+        dom = html.document_fromstring(response.content)
+        if not _check_dom(dom, f"SKIP {str(url)[:80]} "):
             return set()
 
         if (
