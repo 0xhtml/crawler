@@ -20,7 +20,10 @@ FROM_STRING_URLS = {
 
 FROM_STRING_ERROR_URLS = {
     ("/foo.html", "scheme"),
+    ("ftp://foo.com", "scheme"),
+    ("javascript:alert(1)", "scheme"),
     ("https:///foo.html", "host"),
+    ("http://foo.com:123", "port"),
 }
 
 NORMALIZE_URLS = {
@@ -41,12 +44,6 @@ JOIN_URLS = {
     ("https://foo.com/bar", "?abc", "https://foo.com/bar?abc"),
 }
 
-JOIN_ERROR_URLS = {
-    ("https://foo.com/", "ftp://foo.com", "scheme"),
-    ("https://foo.com/", "javascript:alert(1)", "scheme"),
-    ("https://foo.com/", "http://foo.com:123", "port"),
-}
-
 
 @pytest.mark.parametrize(
     ("pre", "post"),
@@ -54,17 +51,13 @@ JOIN_ERROR_URLS = {
     | {(pre, pre) for pre, post in NORMALIZE_URLS}
     | {(post, post) for post, pre in NORMALIZE_URLS}
     | {(base, base) for base, url, joined in JOIN_URLS}
-    | {(joined, joined) for base, url, joined in JOIN_URLS}
-    | {(base, base) for base, url, field in JOIN_ERROR_URLS},
+    | {(joined, joined) for base, url, joined in JOIN_URLS},
 )
 def test_url_from_string(pre: str, post: str):
     assert str(URL.from_string(pre)) == post
 
 
-@pytest.mark.parametrize(
-    ("url", "field"),
-    FROM_STRING_ERROR_URLS | {(url, field) for base, url, field in JOIN_ERROR_URLS},
-)
+@pytest.mark.parametrize(("url", "field"), FROM_STRING_ERROR_URLS)
 def test_url_from_string_error(url: str, field: str):
     with pytest.raises(InvalidURLError, match=field):
         URL.from_string(url)
@@ -74,8 +67,7 @@ def test_url_from_string_error(url: str, field: str):
     ("pre", "post"),
     NORMALIZE_URLS
     | {(post, post) for pre, post in FROM_STRING_URLS}
-    | {(joined, joined) for base, url, joined in JOIN_URLS}
-    | {(base, base) for base, url, field in JOIN_ERROR_URLS},
+    | {(joined, joined) for base, url, joined in JOIN_URLS},
 )
 def test_url_normalize(pre: str, post: str):
     assert str(URL.from_string(pre).normalize()) == post
@@ -93,21 +85,13 @@ def test_url_join(base: str, url: str, joined: str):
     assert str(URL.from_string(base).join(url)) == joined
 
 
-@pytest.mark.parametrize(("base", "url", "field"), JOIN_ERROR_URLS)
-def test_url_join_error(base: str, url: str, field: str):
-    pre = URL.from_string(base)
-    with pytest.raises(InvalidURLError, match=field):
-        pre.join(url)
-
-
 @pytest.mark.parametrize(
     "url",
     {post for pre, post in FROM_STRING_URLS}
     | {pre for pre, post in NORMALIZE_URLS}
     | {post for post, pre in NORMALIZE_URLS}
     | {base for base, url, joined in JOIN_URLS}
-    | {joined for base, url, joined in JOIN_URLS}
-    | {base for base, url, field in JOIN_ERROR_URLS},
+    | {joined for base, url, joined in JOIN_URLS},
 )
 def test_url_to_httpx_url(url: str):
     post = URL.from_string(url).to_httpx_url()
