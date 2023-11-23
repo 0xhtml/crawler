@@ -104,6 +104,10 @@ class Crawler:
             print(f"SKIP {str(url)[:80]} {e.__class__.__name__}: {e}")
             return set()
 
+        if response.is_redirect:
+            assert response.next_request is not None
+            return {URL.from_httpx_url(response.next_request.url)}
+
         if not _check_headers(response):
             return set()
 
