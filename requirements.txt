@@ -1,4 +1,4 @@
-SQLAlchemy==1.4.45
+SQLAlchemy==2.0.23
 fasttext-wheel==0.9.2
 httpx==0.25.1
 lxml==4.9.3

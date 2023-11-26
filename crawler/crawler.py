@@ -8,7 +8,6 @@ import time
 from typing import Any
 
 import httpx
-import sqlalchemy
 from lxml import etree, html
 
 from . import Logger, db, logger
@@ -77,7 +76,7 @@ class Crawler:
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore state used by pickle."""
         self._pool = Pool()
-        self._db_conn = db.ENGINE.connect()
+        self._db = db.Session()
         self._stopping = False
 
         self.__dict__.update(state)
@@ -93,13 +92,14 @@ class Crawler:
 
     async def __aenter__(self) -> "Crawler":
         """Call enter method of database connection."""
-        self._db_conn.__enter__()
+        await self._pool.__aenter__()
+        self._db.__enter__()
         return self
 
     async def __aexit__(self, et, exc, tb) -> None:
         """Close database connection and all open http connections."""
-        await self._pool.aclose()
-        self._db_conn.__exit__(et, exc, tb)
+        await self._pool.__aexit__(et, exc, tb)
+        self._db.__exit__(et, exc, tb)
 
     def add_url(self, url: URL) -> None:
         """Add a URL to the pending URLs."""
@@ -146,12 +146,8 @@ class Crawler:
         HTML_CLEANER(dom)
 
         if _index(response, dom, log):
-            self._db_conn.execute(
-                sqlalchemy.insert(db.DOCUMENTS_TABLE).values(
-                    url=str(url),
-                    content=html.tostring(dom),
-                ),
-            )
+            self._db.merge(db.Document(url=str(url), content=html.tostring(dom)))
+            self._db.commit()
 
         if not _follow(response, log):
             return set()
