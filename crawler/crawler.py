@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 import re
 import time
 from typing import Any
@@ -10,7 +11,7 @@ import httpx
 import sqlalchemy
 from lxml import html
 
-from . import db
+from . import Logger, db, logger
 from .http import URL, HTTPError, Pool
 from .robots import RobotsFileTable
 from .utils import HTML_CLEANER, get_lang, get_links
@@ -20,39 +21,39 @@ _NEWLINE_REGEX = re.compile(rb"\n+")
 _NOFOLLOW_REGEX = re.compile(r"\bnofollow\b", re.A | re.I)
 
 
-def _check_headers(response: httpx.Response, log_prefix: str) -> bool:
+def _check_headers(response: httpx.Response, log: Logger) -> bool:
     if not response.is_success:
-        print(f"{log_prefix}HTTP {response.status_code}")
+        log.debug("not 2xx (HTTP %s)", response.status_code)
         return False
 
     content_type = response.headers.get("Content-Type", "")
     if not content_type.startswith("text/html"):
-        print(f"{log_prefix}not html ({content_type})")
+        log.info("not html (%s)", content_type)
         return False
 
     robots = response.headers.get("X-Robots-Tag", "")
     if _NOFOLLOW_REGEX.search(robots):
-        print(f"{log_prefix}nofollow ({robots})")
+        log.info("nofollow (%s)", robots)
         return False
 
     lang = response.headers.get("Content-Language", "en")
     if not _LANG_REGEX.search(lang):
-        print(f"{log_prefix}lang isn't en or de ({lang})")
+        log.debug("not en or de (%s)", lang)
         return False
 
     return True
 
 
-def _check_dom(dom: html.HtmlElement, log_prefix: str) -> bool:
+def _check_dom(dom: html.HtmlElement, log: Logger) -> bool:
     if dom is None:
-        print(f"{log_prefix}dom is None")
+        log.info("dom is None")
         return False
 
     HTML_CLEANER(dom)
 
     lang = get_lang(dom)
     if lang not in {"en", "de"}:
-        print(f"{log_prefix}lang isn't en or de ({lang})")
+        log.debug("not en or de (%s)", lang)
         return False
 
     return True
@@ -102,10 +103,12 @@ class Crawler:
 
     def stop(self) -> None:
         """Start stopping all workers."""
-        print("Stopping...")
+        logger.warning("Stopping...")
         self._stopping = True
 
     async def _load_page(self, url: URL) -> set[URL]:
+        log = logging.LoggerAdapter(logger, {"url": url})
+
         if (
             self._db_conn.execute(
                 sqlalchemy.select(db.DOCUMENTS_TABLE).filter_by(url=str(url)),
@@ -117,12 +120,13 @@ class Crawler:
         robots_file = await self._robots_file_table.get(url.host, self._pool)
 
         if not robots_file.can_fetch(url):
+            log.debug("disallowed by robots.txt")
             return set()
 
         try:
             response = await self._pool.get(url, True)
         except HTTPError as e:
-            print(f"SKIP {str(url)[:80]} {e.__class__.__name__}: {e}")
+            log.info("http error %s: %s", e.__class__.__name__, e)
             return set()
         finally:
             self._timeouts[url.host] = robots_file.timeout()
@@ -131,11 +135,11 @@ class Crawler:
             assert response.next_request is not None
             return {URL.from_httpx_url(response.next_request.url)}
 
-        if not _check_headers(response, f"SKIP {str(url)[:80]} "):
+        if not _check_headers(response, log):
             return set()
 
         dom = html.document_fromstring(response.content)
-        if not _check_dom(dom, f"SKIP {str(url)[:80]} "):
+        if not _check_dom(dom, log):
             return set()
 
         self._db_conn.execute(
