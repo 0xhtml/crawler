@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 import sqlalchemy
-from lxml import html
+from lxml import etree, html
 
 from . import Logger, db, logger
 from .http import URL, HTTPError, Pool
@@ -138,7 +138,12 @@ class Crawler:
         if not _check_headers(response, log):
             return set()
 
-        dom = html.document_fromstring(response.content)
+        try:
+            dom = html.document_fromstring(response.content, ensure_head_body=True)
+        except etree.ParserError as e:
+            log.info("parser error %s: %s", e.__class__.__name__, e)
+            return set()
+
         if not _check_dom(dom, log):
             return set()
 
