@@ -70,7 +70,8 @@ class Crawler:
         return {
             "_robots_file_table": self._robots_file_table,
             "_timeouts": self._timeouts,
-            "_urls": self._urls,
+            "_pending_urls": self._pending_urls,
+            "_finished_urls": self._finished_urls,
         }
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -85,7 +86,8 @@ class Crawler:
         """Initialize the crawler w/ empty backlog and no connections."""
         self._robots_file_table = RobotsFileTable()
         self._timeouts: dict[str, float] = {}
-        self._urls: set[URL] = set()
+        self._pending_urls: set[URL] = set()
+        self._finished_urls: set[URL] = set()
 
         self.__setstate__({})
 
@@ -102,7 +104,7 @@ class Crawler:
     def add_url(self, url: URL) -> None:
         """Add a URL to the pending URLs."""
         url = url.normalize()
-        self._urls.add(url)
+        self._pending_urls.add(url)
 
     def stop(self) -> None:
         """Start stopping all workers."""
@@ -110,15 +112,9 @@ class Crawler:
         self._stopping = True
 
     async def _load_page(self, url: URL) -> set[URL]:
-        log = logging.LoggerAdapter(logger, {"url": url})
+        assert url not in self._finished_urls
 
-        if (
-            self._db_conn.execute(
-                sqlalchemy.select(db.DOCUMENTS_TABLE).filter_by(url=str(url)),
-            ).first()
-            is not None
-        ):
-            return set()
+        log = logging.LoggerAdapter(logger, {"url": url})
 
         robots_file = await self._robots_file_table.get(url.host, self._pool)
 
@@ -167,7 +163,7 @@ class Crawler:
         tasks: dict[asyncio.Task, URL] = {}
 
         while not self._stopping:
-            for url in self._urls.copy():
+            for url in self._pending_urls.copy():
                 if len(tasks) >= 15:
                     break
 
@@ -177,7 +173,7 @@ class Crawler:
                 if any(t.host == url.host for t in tasks.values()):
                     continue
 
-                self._urls.remove(url)
+                self._pending_urls.remove(url)
                 tasks[asyncio.create_task(self._load_page(url))] = url
 
             done, _ = await asyncio.wait(
@@ -186,13 +182,17 @@ class Crawler:
             )
 
             for task in done:
-                tasks.pop(task)
-                self._urls.update(task.result())
+                self._finished_urls.add(tasks.pop(task))
+
+                urls = task.result()
+                urls.difference_update(self._finished_urls)
+                urls.difference_update(tasks.values())
+                self._pending_urls.update(urls)
 
         for task, url in tasks.items():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-            self._urls.add(url)
+            self._pending_urls.add(url)
 
         self._stopping = False
