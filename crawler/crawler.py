@@ -17,7 +17,7 @@ from .robots import RobotsFileTable
 from .utils import HTML_CLEANER, get_lang, get_links
 
 _LANG_REGEX = re.compile(r"\b(?:en|de)\b", re.A | re.I)
-_NEWLINE_REGEX = re.compile(rb"\n+")
+_NOINDEX_REGEX = re.compile(r"\bnofollow\b", re.A | re.I)
 _NOFOLLOW_REGEX = re.compile(r"\bnofollow\b", re.A | re.I)
 
 
@@ -31,9 +31,13 @@ def _check_headers(response: httpx.Response, log: Logger) -> bool:
         log.info("not html (%s)", content_type)
         return False
 
+    return True
+
+
+def _index(response: httpx.Response, dom: html.HtmlElement, log: Logger) -> bool:
     robots = response.headers.get("X-Robots-Tag", "")
-    if _NOFOLLOW_REGEX.search(robots):
-        log.info("nofollow (%s)", robots)
+    if _NOINDEX_REGEX.search(robots):
+        log.info("noindex (%s)", robots)
         return False
 
     lang = response.headers.get("Content-Language", "en")
@@ -41,19 +45,18 @@ def _check_headers(response: httpx.Response, log: Logger) -> bool:
         log.debug("not en or de (%s)", lang)
         return False
 
-    return True
-
-
-def _check_dom(dom: html.HtmlElement, log: Logger) -> bool:
-    if dom is None:
-        log.info("dom is None")
-        return False
-
-    HTML_CLEANER(dom)
-
     lang = get_lang(dom)
     if lang not in {"en", "de"}:
         log.debug("not en or de (%s)", lang)
+        return False
+
+    return True
+
+
+def _follow(response: httpx.Response, log: Logger) -> bool:
+    robots = response.headers.get("X-Robots-Tag", "")
+    if _NOFOLLOW_REGEX.search(robots):
+        log.info("nofollow (%s)", robots)
         return False
 
     return True
@@ -143,16 +146,19 @@ class Crawler:
         except etree.ParserError as e:
             log.info("parser error %s: %s", e.__class__.__name__, e)
             return set()
+        assert dom is not None
+        HTML_CLEANER(dom)
 
-        if not _check_dom(dom, log):
+        if _index(response, dom, log):
+            self._db_conn.execute(
+                sqlalchemy.insert(db.DOCUMENTS_TABLE).values(
+                    url=str(url),
+                    content=html.tostring(dom),
+                ),
+            )
+
+        if not _follow(response, log):
             return set()
-
-        self._db_conn.execute(
-            sqlalchemy.insert(db.DOCUMENTS_TABLE).values(
-                url=str(url),
-                content=_NEWLINE_REGEX.sub(b"\n", html.tostring(dom)),
-            ),
-        )
 
         return get_links(url, dom)
 
