@@ -16,7 +16,7 @@ from .robots import RobotsFileTable
 from .utils import HTML_CLEANER, get_lang, get_links
 
 _LANG_REGEX = re.compile(r"\b(?:en|de)\b", re.A | re.I)
-_NOINDEX_REGEX = re.compile(r"\bnofollow\b", re.A | re.I)
+_NOINDEX_REGEX = re.compile(r"\bnoindex\b", re.A | re.I)
 _NOFOLLOW_REGEX = re.compile(r"\bnofollow\b", re.A | re.I)
 
 
